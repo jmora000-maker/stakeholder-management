@@ -20,6 +20,11 @@ data_folder = src_dir / "data"
 vector_store_folder = src_dir / "vector_store"
 output_folder = src_dir / "outputs"
 
+#Hardcoding files for demo
+stakeholder_register_path = data_folder / "stakeholder_register.csv"
+stakeholder_plan_path = data_folder / "engagement_plan.md"
+meeting_notes_path = data_folder / "meeting_notes.md"
+
 for folder in [data_folder, vector_store_folder, output_folder]:
     folder.mkdir(parents=True, exist_ok=True)
 
@@ -636,22 +641,30 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("System Configuration")
 
-    uploaded_reg = st.file_uploader("Upload Stakeholder Register (.csv)", type=["csv"])
-    uploaded_plan = st.file_uploader("Upload Engagement Strategy (.md)", type=["md"])
-    uploaded_notes = st.file_uploader("Upload Meeting Notes (.md)", type=["md"])
-
-    if uploaded_reg:
-        pd.read_csv(uploaded_reg).to_csv(stakeholder_register_path, index=False)
-
-    if uploaded_plan:
-        stakeholder_plan_path.write_bytes(uploaded_plan.getvalue())
-
-    if uploaded_notes:
-        meeting_notes_path.write_bytes(uploaded_notes.getvalue())
-
+    # --- 2. Hardcoded File Loading Logic ---
+    # Check if the data folder exists
     if data_folder.exists():
-        files = [f.name for f in data_folder.iterdir() if f.is_file()]
-        st.write("Current Stakeholder Files:", files)
+
+        st.text(f"Files found in '{data_folder.name}'")
+        # iterdir() yields Path objects; we grab .name for just the filename
+        files = [f.name for f in data_folder.iterdir()]
+        st.write(files)
+
+        # Verify the specific files exist before trying to read them
+        if stakeholder_register_path.exists():
+            # Read the CSV directly into a DataFrame
+            df_register = pd.read_csv(stakeholder_register_path)
+            # You can now use df_register throughout your app
+        else:
+            st.error(f"Missing file: {stakeholder_register_path.name}")
+
+        if stakeholder_plan_path.exists():
+            plan_content = stakeholder_plan_path.read_text(encoding="utf-8")
+
+        if meeting_notes_path.exists():
+            notes_content = meeting_notes_path.read_text(encoding="utf-8")
+    else:
+        st.error(f"Data directory '{data_folder}' does not exist. Please create it and add your files.")
 
     start_pipeline = st.button("Execute Stakeholder Gap Pipeline", use_container_width=True, type="primary")
 
@@ -673,24 +686,23 @@ with col2:
 
         if final_narrative:
             with report_placeholder.container():
-                st.markdown(
+                st.html(
                     f"""
-                    <div style="
-                        background-color: #1e293b; 
-                        color: #f8fafc; 
-                        padding: 20px; 
-                        border-radius: 8px; 
-                        height: 550px; 
-                        overflow-y: scroll; 
-                        white-space: pre-wrap; 
-                        font-family: inherit;
-                        border: 1px solid #334155;
-                        line-height: 1.5;
-                    ">
-                        <p style="font-size: 16px !important; margin: 0; padding: 0;">{final_narrative}</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
+                                <div style="
+                                    background-color: #1e293b; 
+                                    color: #f8fafc; 
+                                    padding: 20px; 
+                                    border-radius: 8px; 
+                                    height: 550px; 
+                                    overflow-y: scroll; 
+                                    white-space: pre-wrap; 
+                                    font-family: inherit;
+                                    border: 1px solid #334155;
+                                    line-height: 1.5;
+                                ">
+                                    <p style="font-size: 16px !important; margin: 0; padding: 0;">{final_narrative}</p>
+                                </div>
+                                """
                 )
 
                 st.download_button(
