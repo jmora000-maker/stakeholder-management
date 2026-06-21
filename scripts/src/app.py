@@ -80,13 +80,16 @@ class StreamlitStdoutRedirector:
         self.max_chars = max_chars
 
     def write(self, text):
-        self.output_str += text
+        if not text:
+            return
+        self.output_str += str(text)
         if len(self.output_str) > self.max_chars:
             self.output_str = self.output_str[-self.max_chars:]
         self.placeholder.code(self.output_str, language="text")
 
     def flush(self):
         pass
+
 
 # --- INTERNAL FACT DOMAIN SCHEMAS ---
 class Stakeholder(BaseModel):
@@ -173,15 +176,25 @@ class ExecutiveStakeholderGapReport(BaseModel):
 
 # --- PIPELINE LAYER: CORE UTILITIES ---
 def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
+    if chunk_size <= 0:
+        return []
     if overlap >= chunk_size:
-        overlap = chunk_size // 2
+        overlap = max(1, chunk_size // 2)
+
     words = text.split()
+    if not words:
+        return []
+
+    step = max(1, chunk_size - overlap)
     chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = " ".join(words[i:i + chunk_size])
+
+    for i in range(0, len(words), step):
+        chunk = " ".join(words[i:i + chunk_size]).strip()
         if chunk:
             chunks.append(chunk)
+
     return chunks
+
 
 
 def get_embedding(text: str) -> List[float]:
@@ -388,57 +401,57 @@ class StructuredProjectContext:
 
         # 3. PARSER SPECIFIC: Meeting Notes (Context-Rich Sweep)
                 # 3. PARSER SPECIFIC: Meeting Notes (Context-Rich Sweep)
-                if meeting_notes_path.exists():
-                    print(" -> Pass 2: Chunking notes.")
-                    notes_lines = meeting_notes_path.read_text(encoding="utf-8").split("\n")
+        if meeting_notes_path.exists():
+            print(" -> Pass 2: Chunking notes.")
+            notes_lines = meeting_notes_path.read_text(encoding="utf-8").split("\n")
+            is_attendee_line = False
+
+            for idx, line in enumerate(notes_lines):
+                lowered_line = line.lower()
+                if "attendees:" in lowered_line:
+                    is_attendee_line = True
+
+                for target_name in self.discovered_names:
+                    if target_name.lower() in lowered_line:
+                        # Determine attendee status
+                        is_att = is_attendee_line and (
+                                    target_name.lower() in lowered_line.split("attendees:")[-1])
+
+                        # --- LOGIC TO DEFINE MENTION TYPE ---
+                        if is_att:
+                            m_type = "attendee"
+                        elif any(k in lowered_line for k in
+                                 ["concern", "anxiety", "risk", "issue", "flagged", "stalled",
+                                  "vulnerability"]):
+                            m_type = "concern"
+                        else:
+                            m_type = "discussion"
+                        # ------------------------------------
+
+                        self.meeting_mentions.append(MeetingMention(
+                            stakeholder_name=target_name,
+                            context_snippet=line.strip(),
+                            source_artifact="Meeting_Notes.md",
+                            line_number=idx + 1,
+                            is_explicit_attendee=is_att,
+                            mention_type=m_type
+                        ))
+
+                        # Keep your existing concern logic if you still want to populate self.concerns separately
+                        if m_type == "concern":
+                            category = self.normalizer.classify_concern(line)
+                            severity = "High" if "architecture" in lowered_line or "blockage" in lowered_line else "Medium"
+                            self.concerns.append(Concern(
+                                description=line.replace("-", "").strip(),
+                                stakeholder_name=target_name,
+                                normalized_category=category,
+                                severity=severity,
+                                source_artifact="Meeting_Notes.md",
+                                line_number=idx + 1,
+                                snippet=line.strip()
+                            ))
+                if line.strip() == "":
                     is_attendee_line = False
-
-                    for idx, line in enumerate(notes_lines):
-                        lowered_line = line.lower()
-                        if "attendees:" in lowered_line:
-                            is_attendee_line = True
-
-                        for target_name in self.discovered_names:
-                            if target_name.lower() in lowered_line:
-                                # Determine attendee status
-                                is_att = is_attendee_line and (
-                                            target_name.lower() in lowered_line.split("attendees:")[-1])
-
-                                # --- LOGIC TO DEFINE MENTION TYPE ---
-                                if is_att:
-                                    m_type = "attendee"
-                                elif any(k in lowered_line for k in
-                                         ["concern", "anxiety", "risk", "issue", "flagged", "stalled",
-                                          "vulnerability"]):
-                                    m_type = "concern"
-                                else:
-                                    m_type = "discussion"
-                                # ------------------------------------
-
-                                self.meeting_mentions.append(MeetingMention(
-                                    stakeholder_name=target_name,
-                                    context_snippet=line.strip(),
-                                    source_artifact="Meeting_Notes.md",
-                                    line_number=idx + 1,
-                                    is_explicit_attendee=is_att,
-                                    mention_type=m_type
-                                ))
-
-                                # Keep your existing concern logic if you still want to populate self.concerns separately
-                                if m_type == "concern":
-                                    category = self.normalizer.classify_concern(line)
-                                    severity = "High" if "architecture" in lowered_line or "blockage" in lowered_line else "Medium"
-                                    self.concerns.append(Concern(
-                                        description=line.replace("-", "").strip(),
-                                        stakeholder_name=target_name,
-                                        normalized_category=category,
-                                        severity=severity,
-                                        source_artifact="Meeting_Notes.md",
-                                        line_number=idx + 1,
-                                        snippet=line.strip()
-                                    ))
-                        if line.strip() == "":
-                            is_attendee_line = False
 
             for chunk in chunk_text("\n".join(notes_lines)):
                 self.raw_chunks.append({
