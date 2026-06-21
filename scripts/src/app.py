@@ -205,8 +205,9 @@ import contextlib
 import numpy as np
 import pandas as pd
 import streamlit as st
+from altair.vegalite import data
 from openai import OpenAI
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, dataclasses
 from typing import Annotated
 import docx
 
@@ -227,6 +228,50 @@ vector_store_folder = project_root / "vector_store"
 
 stakeholder_gap_report_path = output_folder / "STAKEHOLDER_GAP_REPORT.txt"
 database_file_destination = vector_store_folder / "global_vector_store.json"
+
+
+"""BELOW ARE THREE TEST FILES THAT ARE TO BE PARSED
+If your extraction and gap rules are working, these files should produce findings like this:
+
+1. Missing stakeholder
+Liam Patel appears in the meeting notes but is not in the stakeholder register.
+
+You can implement a simple rule like:
+
+extract person names from meeting attendees and discussion text
+compare them to normalized names in the stakeholder register
+flag any repeated or meaningful stakeholder mention not found in the register
+2. Missing engagement coverage
+Helen Brooks is in the stakeholder register and is high influence, but the engagement plan only mentions compliance in a vague note:
+
+“Compliance engagement will be handled through existing governance channels.”
+
+That is weak coverage compared with named strategies for other stakeholders.
+
+Your app should flag that Helen Brooks lacks a specific engagement strategy, cadence, and owner-aligned actions.
+
+3. Recurring concern mismatch
+Recurring concerns appear in the meeting notes:
+
+audit logging
+access control
+compliance sign-off
+training readiness
+support scripts
+Some are only partially covered in the plan, and some are not tied to explicit stakeholder engagement actions.
+
+Good gap logic would detect that:
+
+Priya’s recurring concerns around audit logging and access control are repeated
+Helen’s recurring concern around compliance approval/sign-off is repeated
+David’s training readiness concern recurs
+Fatima’s support scripts / enablement concern recurs
+Then compare those concerns to plan actions. If no direct action or only vague action exists, flag a mismatch."""
+
+meeting_notes_path = data_folder / "Meeting_Notes.md"
+stakeholder_plan_path = data_folder / "Stakeholder_Engagement_Plan.md"
+stakeholder_register_path = dataclasses / "Stakeholder_Register.csv"
+
 
 # Ensure the paths exists
 folder_paths = [log_folder, output_folder, data_folder, vector_store_folder]
@@ -250,36 +295,41 @@ NarrativeText = Annotated[
 
 # This is the model for the stakeholder gap report to be used in the stakeholder gap dashboard.
 
+class EvidenceItem(BaseModel):
+    source: str
+    snippet: str
+
 class StakeholderGapReport(BaseModel):
-    gap_category: str
+    gap_category: Annotated[str, Field(description="The stakeholder gap category in ALL CAPS, for example MISSING STAKEHOLDER or EXECUTION GAP.")]
     stakeholder_name: str
     severity: str
     confidence: str
-    observed_gap: str
-    practical_impact: str
-    recommended_action: str
+    observed_gap: Annotated[str, Field(description="A concise description of the stakeholder engagement gap.")]
+    practical_impact: Annotated[str, Field(description="The likely project or stakeholder impact if the gap is not addressed.")]
+    recommended_action: Annotated[str, Field(description="A concrete action the project manager should take to address the gap.")]
     evidence: list[EvidenceItem]
 
-    class EvidenceItem(BaseModel):
-        source: str
-        snippet: str
+class Stakeholder(BaseModel):
+    name: str
+    role: str
+    influence: str
+    interest: str
+    desired_engagement: str
 
-    gap_category: Annotated[
-        str,
-        Field(description="The stakeholder gap category in ALL CAPS, for example MISSING STAKEHOLDER or EXECUTION GAP.")
-    ]
-    observed_gap: Annotated[
-        str,
-        Field(description="A concise description of the stakeholder engagement gap.")
-    ]
-    practical_impact: Annotated[
-        str,
-        Field(description="The likely project or stakeholder impact if the gap is not addressed.")
-    ]
-    recommended_action: Annotated[
-        str,
-        Field(description="A concrete action the project manager should take to address the gap.")
-    ]
+class Concern(BaseModel):
+    description: str
+    stakeholder_name: str
+    severity: str
+
+class EngagementAction(BaseModel):
+    action: str
+    stakeholder_name: str
+    status: str
+
+class CommunicationCadence(BaseModel):
+    stakeholder_name: str
+    cadence: str
+    channel: str
 
 # This is the model for the executive stakeholder gap report to be used in the stakeholder gap dashboard.
 class ExecutiveStakeholderGapReport(BaseModel):
@@ -395,20 +445,30 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
 
     return float(np.dot(a, b) / denominator)
 
+def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+    chunks = []
+    for i in range(0, len(text), chunk_size - overlap):
+        chunks.append(text[i:i + chunk_size])
+    return chunks
+
 # This function chunks the .docx stakeholder plan using the docx library
-def chunk_stakeholder_plan(filepath: Path) -> list[dict]:
+def chunk_stakeholder_plan(filepath: Path, chunk_size: int = 500, overlap: int = 80) -> list[dict]:
     chunks = []
     filename = filepath.name
     doc = docx.Document(filepath)
     text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+    for c in chunk_text(text, chunk_size, overlap):
+        chunks.append({"text": c, "source": filename})
     return chunks
 
 # This function chunks the .docx meeting notes using the docx library
-def chunk_meeting_notes(filepath: Path) -> list[dict]:
+def chunk_meeting_notes(filepath: Path, chunk_size: int = 500, overlap: int = 80) -> list[dict]:
     chunks = []
     filename = filepath.name
     doc = docx.Document(filepath)
     text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+    for c in chunk_text(text, chunk_size, overlap):
+        chunks.append({"text": c, "source": filename})
     return chunks
 
 # This function chunks the .xlsx stakeholder register using the pandas library
@@ -556,11 +616,11 @@ class StakeholderMatcher:
         return self.alias_map.get(normalized, normalized)
 
 
-def run_gap_analysis(fact_store: StakeholderFactStore, vector_store: SimpleVectorStore) -> list[dict]:
+def run_gap_analysis(fact_store: StakeholderFactStore, vector_store: SimpleVectorStore, matcher: StakeholderMatcher | None, gap_queries: list[str]) -> list[dict]:
     detector = GapDetector(fact_store)
 
     findings = []
-
+    # Simplified logic for gap detection using matcher and queries
     for stakeholder in detector.find_missing_stakeholders():
         evidence = vector_store.search(f"{stakeholder} stakeholder meeting concern", top_k=3)
         findings.append({
@@ -570,7 +630,6 @@ def run_gap_analysis(fact_store: StakeholderFactStore, vector_store: SimpleVecto
             "recommended_action": "Review the stakeholder register and define an engagement approach.",
             "evidence": evidence
         })
-
     return findings
 
 
@@ -579,6 +638,7 @@ def run_gap_analysis(fact_store: StakeholderFactStore, vector_store: SimpleVecto
 
 def generate_gap_report(
     structured_report: ExecutiveStakeholderGapReport,
+    audit_results: list[dict],
     file_path: Path
 ) -> str:
     lines = []
@@ -646,6 +706,7 @@ def run_automated_pipeline(log_placeholder):
         # --- 1. CREATING VECTOR STORE ---
         print("STEP 1: Creating Vector Store.")
         store = SimpleVectorStore()
+        fact_store = StakeholderFactStore(vector_store_folder / "stakeholder_facts.json")
 
         # 1. Ensure the directory path exists
         target_dir = database_file_destination.parent
@@ -670,18 +731,16 @@ def run_automated_pipeline(log_placeholder):
 
         # --- 2. Identifying unregistered risks ---
         print(f"STEP 2: Starting automated risk audit.")
-        matcher = StakeholderMatcher(register_path) if register_path.exists() else None
-
-        if not matcher:
-            print(f"Warning: Register not found at {register_path}. Skipping registration check.")
-
+        register_path = data_folder / "Stakeholder_Register.xlsx"
+        matcher = StakeholderMatcher() # Simplification as alias_map is not clearly defined in scope
+        
         gap_queries = [
             "staffing turnover, resource departures, personnel shortages",
             "security vulnerabilities, mTLS failures, unauthorized data access",
             "data pipeline errors, system latency, memory leaks, parsing crashes"
         ]
 
-        discovered_gap_data = run_gap_analysis(store, matcher, audit_queries)
+        discovered_gap_data = run_gap_analysis(fact_store, store, matcher, gap_queries)
 
         # --- 3. Synthesize with LLM ---
         print("STEP 3: Synthesizing AI Report Narrative via Structured Validation.")
@@ -690,7 +749,7 @@ def run_automated_pipeline(log_placeholder):
 
         # --- 4. Generate file on disk ---
         print("STEP 4: Generating Structured Risk Audit Report Artifacts.")
-        final_report_text = generate_gap_report(structured_report_obj, discovered_gap_data, report_path)
+        final_report_text = generate_gap_report(structured_report_obj, discovered_gap_data, stakeholder_gap_report_path)
 
         print("PIPELINE COMPLETED.")
         return final_report_text
