@@ -22,9 +22,9 @@ vector_store_folder = root_folder / "vector_store"
 output_folder = root_folder / "outputs"
 
 #Hardcoding files for demo
-stakeholder_register_path = data_folder / "stakeholder_register.csv"
-stakeholder_plan_path = data_folder / "engagement_plan.md"
-meeting_notes_path = data_folder / "meeting_notes.md"
+stakeholder_register_path = data_folder / "Stakeholder_Register.csv"
+stakeholder_plan_path = data_folder / "Stakeholder_Engagement_Plan.md"
+meeting_notes_path = data_folder / "Meeting_Notes.md"
 
 folder_paths = [data_folder, vector_store_folder, output_folder]
 for folder in folder_paths:
@@ -32,10 +32,6 @@ for folder in folder_paths:
 
 stakeholder_gap_report_path = output_folder / "STAKEHOLDER_GAP_REPORT.txt"
 database_file_destination = vector_store_folder / "global_vector_store.json"
-
-meeting_notes_path = data_folder / "Meeting_Notes.md"
-stakeholder_plan_path = data_folder / "Stakeholder_Engagement_Plan.md"
-stakeholder_register_path = data_folder / "Stakeholder_Register.csv"
 
 # Populate sample data if files do not exist
 if not stakeholder_register_path.exists():
@@ -200,11 +196,21 @@ def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]
 def get_embedding(text: str) -> List[float]:
     if not is_vector_search_enabled:
         return []
-    try:
-        response = client.embeddings.create(model="text-embedding-3-small", input=str(text))
-        return response.data[0].embedding
-    except Exception:
+
+    cleaned = " ".join(str(text).split())
+    if not cleaned:
         return []
+
+    try:
+        response = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=cleaned
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        print(f" -> Embedding generation failed: {e}")
+        return []
+
 
 
 def cosine_similarity(v1: List[float], v2: List[float]) -> float:
@@ -220,10 +226,12 @@ class SimpleVectorStore:
         self.entries = []
 
     def save(self, path: Path):
+        print(" -> Saving vector index.")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.entries, f)
 
     def load(self, path: Path):
+        print(" -> Loading vector index.")
         if path.exists():
             with open(path, "r", encoding="utf-8") as f:
                 self.entries = json.load(f)
@@ -684,14 +692,10 @@ def generate_executive_summary(structured_report: ExecutiveStakeholderGapReport)
     # Iterate over 'findings'
     for finding in structured_report.findings:
         lines.append(f"{finding.gap_category}:")
-        lines.append(f"Stakeholder Name: {finding.stakeholder_name}")
-        lines.append(f"Observed Anomaly: {finding.observed_gap}")
+        lines.append(f"Stakeholder: {finding.stakeholder_name}")
+        lines.append(f"Issue: {finding.observed_gap}")
         lines.append(f"Operational Impact: {finding.practical_impact}")
         lines.append(f"Recommendation: {finding.recommended_action}")
-        lines.append("")
-        lines.append("Foundational Evidence Passages:")
-        for ev in finding.evidence:
-            lines.append(f"  - [{ev.source}]: \"{ev.snippet[:140]}\"")
         lines.append("")
 
     final_report_text = "\n".join(lines)
@@ -713,7 +717,20 @@ def run_automated_pipeline() -> str:
 
     print("STEP 3: Building Vector Index.")
     store = SimpleVectorStore()
-    store.build_indices(context.raw_chunks)
+
+    target_dir = database_file_destination.parent
+    if not target_dir.exists():
+        print(f" -> Creating missing directory: {target_dir}")
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2. Check for the file
+    if database_file_destination.exists():
+        print(f" -> Found existing vector store: {database_file_destination.name}")
+        store.load(database_file_destination)
+    else:
+        print(" -> No existing vector store found. Starting new ingestion...")
+        store.build_indices(context.raw_chunks)
+        store.save(database_file_destination)
 
     print("STEP 4: Executing Gap Detection.")
     detector = GapDetector(context, store)
