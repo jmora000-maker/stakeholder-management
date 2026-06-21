@@ -16,16 +16,18 @@ today_obj = date.today()
 today = today_obj.strftime("%B %d, %Y")
 
 src_dir = Path(__file__).resolve().parent
-data_folder = src_dir / "data"
-vector_store_folder = src_dir / "vector_store"
-output_folder = src_dir / "outputs"
+root_folder = src_dir.parent.parent
+data_folder = root_folder / "data"
+vector_store_folder = root_folder / "vector_store"
+output_folder = root_folder / "outputs"
 
 #Hardcoding files for demo
 stakeholder_register_path = data_folder / "stakeholder_register.csv"
 stakeholder_plan_path = data_folder / "engagement_plan.md"
 meeting_notes_path = data_folder / "meeting_notes.md"
 
-for folder in [data_folder, vector_store_folder, output_folder]:
+folder_paths = [data_folder, vector_store_folder, output_folder]
+for folder in folder_paths:
     folder.mkdir(parents=True, exist_ok=True)
 
 stakeholder_gap_report_path = output_folder / "STAKEHOLDER_GAP_REPORT.txt"
@@ -72,25 +74,30 @@ client = OpenAI(api_key=api_key)
 
 # --- UTILITY TO CAPTURE STDOUT ---
 class StreamlitStdoutRedirector:
-    def __init__(self, placeholder):
+    def __init__(self, placeholder, max_chars: int = 8000):
         self.placeholder = placeholder
         self.output_str = ""
+        self.max_chars = max_chars
 
     def write(self, text):
         self.output_str += text
+        if len(self.output_str) > self.max_chars:
+            self.output_str = self.output_str[-self.max_chars:]
         self.placeholder.code(self.output_str, language="text")
 
     def flush(self):
         pass
 
-
 # --- INTERNAL FACT DOMAIN SCHEMAS ---
 class Stakeholder(BaseModel):
+    stakeholder_id: str
     name: str
     role: str
     influence: str
     interest: str
     desired_engagement: str
+    source_artifact: str
+    source_row: Optional[int] = None
 
 
 class Concern(BaseModel):
@@ -101,11 +108,14 @@ class Concern(BaseModel):
     source_artifact: str
     line_number: int
     snippet: str
+    concern_keywords: List[str] = []
 
 
 class EngagementAction(BaseModel):
     action_strategy: str
     stakeholder_name: str
+    owner_text: Optional[str] = None
+    cadence_text: Optional[str] = None
     has_owner: bool
     has_cadence: bool
     source_artifact: str
@@ -119,10 +129,11 @@ class MeetingMention(BaseModel):
     source_artifact: str
     line_number: int
     is_explicit_attendee: bool
+    mention_type: str  # attendee, discussion, concern
 
 
 class GapFinding(BaseModel):
-    """Middle-tier model decoupling raw structural facts from LLM synthesis narrative"""
+    finding_id: str
     gap_category: str
     stakeholder_name: str
     severity: str
@@ -138,6 +149,8 @@ class GapFinding(BaseModel):
 class EvidenceItem(BaseModel):
     source: str
     snippet: str
+    line_number: Optional[int] = None
+    artifact_type: Optional[str] = None
 
 
 class StakeholderGapReport(BaseModel):
@@ -149,15 +162,14 @@ class StakeholderGapReport(BaseModel):
     observed_gap: str
     practical_impact: str
     recommended_action: str
+    finding_id: str
     evidence: List[EvidenceItem]
 
 
 class ExecutiveStakeholderGapReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    executive_summary: str = Field(
-        description="2-3 professional, highly grounded program governance executive summary sentences.")
-    categories: List[StakeholderGapReport]
-
+    executive_summary: str
+    findings: List[StakeholderGapReport]
 
 # --- PIPELINE LAYER: CORE UTILITIES ---
 def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
@@ -189,14 +201,22 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     norm = np.linalg.norm(a) * np.linalg.norm(b)
     return float(np.dot(a, b) / norm) if norm > 0 else 0.0
 
-
 # --- PIPELINE LAYER: VECTOR ENGINE ---
 class SimpleVectorStore:
     def __init__(self):
         self.entries = []
 
+    def save(self, path: Path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.entries, f)
+
+    def load(self, path: Path):
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                self.entries = json.load(f)
+
     def build_indices(self, chunks: List[Dict]):
-        print(" -> Building vector indices...")
+        print(" -> Building vector indices.")
         print(f" -> Found {len(chunks)} chunks to index.")
         self.entries = []
         if not is_vector_search_enabled:
@@ -206,18 +226,29 @@ class SimpleVectorStore:
             if embedding:
                 self.entries.append({**chunk, "embedding": embedding})
 
-    def search(self, query: str, top_k: int = 2) -> List[Dict]:
+    def search(self, query: str, top_k: int = 2, min_similarity: float = 0.20) -> List[Dict]:
         if not is_vector_search_enabled or not self.entries:
             return []
+
         query_vector = get_embedding(query)
         if not query_vector:
             return []
+
         scored = []
         for entry in self.entries:
             sim = cosine_similarity(query_vector, entry["embedding"])
-            scored.append((sim, entry))
+            if sim >= min_similarity:
+                scored.append((sim, entry))
+
         scored.sort(reverse=True, key=lambda x: x[0])
-        return [{"source": item[1]["metadata"]["source"], "snippet": item[1]["text"]} for item in scored[:top_k]]
+        return [
+            {
+                "source": item[1]["metadata"].get("source", "Unknown"),
+                "snippet": item[1]["text"],
+                "score": round(item[0], 3)
+            }
+            for item in scored[:top_k]
+        ]
 
 
 # --- PIPELINE LAYER: TAXONOMY & NORMALIZATION ---
@@ -280,23 +311,23 @@ class StructuredProjectContext:
         self.raw_chunks: List[Dict] = []
 
     def ingest_data(self):
-        # Phase 0: Dynamic Discovery Sweep Across Registers
+        # Pass 1: Dynamic Discovery Sweep Across Registers
         if stakeholder_register_path.exists():
-            print(" -> Ingesting stakeholder register...")
+            print(" -> Pass 1: Discovering names from register.")
             df = pd.read_csv(stakeholder_register_path)
             for _, row in df.iterrows():
                 n = str(row.get("name", "")).strip()
                 if n: self.discovered_names.add(self.normalizer.normalize_name(n))
 
         if stakeholder_plan_path.exists():
-            print(" -> Ingesting stakeholder engagement plan...")
+            print(" -> Pass 1: Discovering names from plan.")
             for line in stakeholder_plan_path.read_text(encoding="utf-8").split("\n"):
                 if line.strip().startswith("-") and ":" in line:
                     n = line.split(":", 1)[0].replace("-", "").strip()
                     if n: self.discovered_names.add(self.normalizer.normalize_name(n))
 
         if meeting_notes_path.exists():
-            print(" -> Ingesting stakeholder meeting notes...")
+            print(" -> Pass 1: Discovering names from meetings.")
             for line in meeting_notes_path.read_text(encoding="utf-8").split("\n"):
                 if "attendees:" in line.lower():
                     for name_part in line.split(":", 1)[1].split(","):
@@ -305,7 +336,7 @@ class StructuredProjectContext:
 
         # 1. PARSER SPECIFIC: Stakeholder Register (CSV Domain Model Engine)
         if stakeholder_register_path.exists():
-            print(" -> Ingesting stakeholder register...")
+            print(" -> Pass 2: Chunking register.")
             df = pd.read_csv(stakeholder_register_path)
             for idx, row in df.iterrows():
                 raw_name = str(row.get("name", "")).strip()
@@ -324,9 +355,9 @@ class StructuredProjectContext:
                                  "line": idx}
                 })
 
-        # 2. PARSER SPECIFIC: Engagement Strategy (Strict Bullet Syntax)
+        # 2. PARSER SPECIFIC: Engagement Plan (Strict Bullet Syntax)
         if stakeholder_plan_path.exists():
-            print(" -> Ingesting stakeholder engagement plan...")
+            print(" -> Pass 2: Chunking plan.")
             plan_lines = stakeholder_plan_path.read_text(encoding="utf-8").split("\n")
             for idx, line in enumerate(plan_lines):
                 if line.strip().startswith("-") and ":" in line:
@@ -356,43 +387,58 @@ class StructuredProjectContext:
                 })
 
         # 3. PARSER SPECIFIC: Meeting Notes (Context-Rich Sweep)
-        if meeting_notes_path.exists():
-            print(" -> Ingesting stakeholder meeting notes...")
-            notes_lines = meeting_notes_path.read_text(encoding="utf-8").split("\n")
-            is_attendee_line = False
-
-            for idx, line in enumerate(notes_lines):
-                lowered_line = line.lower()
-                if "attendees:" in lowered_line:
-                    is_attendee_line = True
-
-                for target_name in self.discovered_names:
-                    if target_name.lower() in lowered_line:
-                        is_att = is_attendee_line and (target_name.lower() in lowered_line.split("attendees:")[-1])
-
-                        self.meeting_mentions.append(MeetingMention(
-                            stakeholder_name=target_name,
-                            context_snippet=line.strip(),
-                            source_artifact="Meeting_Notes.md",
-                            line_number=idx + 1,
-                            is_explicit_attendee=is_att
-                        ))
-
-                        if any(k in lowered_line for k in
-                               ["concern", "anxiety", "risk", "issue", "flagged", "stalled", "vulnerability"]):
-                            category = self.normalizer.classify_concern(line)
-                            severity = "High" if "architecture" in lowered_line or "blockage" in lowered_line else "Medium"
-                            self.concerns.append(Concern(
-                                description=line.replace("-", "").strip(),
-                                stakeholder_name=target_name,
-                                normalized_category=category,
-                                severity=severity,
-                                source_artifact="Meeting_Notes.md",
-                                line_number=idx + 1,
-                                snippet=line.strip()
-                            ))
-                if line.strip() == "":
+                # 3. PARSER SPECIFIC: Meeting Notes (Context-Rich Sweep)
+                if meeting_notes_path.exists():
+                    print(" -> Pass 2: Chunking notes.")
+                    notes_lines = meeting_notes_path.read_text(encoding="utf-8").split("\n")
                     is_attendee_line = False
+
+                    for idx, line in enumerate(notes_lines):
+                        lowered_line = line.lower()
+                        if "attendees:" in lowered_line:
+                            is_attendee_line = True
+
+                        for target_name in self.discovered_names:
+                            if target_name.lower() in lowered_line:
+                                # Determine attendee status
+                                is_att = is_attendee_line and (
+                                            target_name.lower() in lowered_line.split("attendees:")[-1])
+
+                                # --- LOGIC TO DEFINE MENTION TYPE ---
+                                if is_att:
+                                    m_type = "attendee"
+                                elif any(k in lowered_line for k in
+                                         ["concern", "anxiety", "risk", "issue", "flagged", "stalled",
+                                          "vulnerability"]):
+                                    m_type = "concern"
+                                else:
+                                    m_type = "discussion"
+                                # ------------------------------------
+
+                                self.meeting_mentions.append(MeetingMention(
+                                    stakeholder_name=target_name,
+                                    context_snippet=line.strip(),
+                                    source_artifact="Meeting_Notes.md",
+                                    line_number=idx + 1,
+                                    is_explicit_attendee=is_att,
+                                    mention_type=m_type
+                                ))
+
+                                # Keep your existing concern logic if you still want to populate self.concerns separately
+                                if m_type == "concern":
+                                    category = self.normalizer.classify_concern(line)
+                                    severity = "High" if "architecture" in lowered_line or "blockage" in lowered_line else "Medium"
+                                    self.concerns.append(Concern(
+                                        description=line.replace("-", "").strip(),
+                                        stakeholder_name=target_name,
+                                        normalized_category=category,
+                                        severity=severity,
+                                        source_artifact="Meeting_Notes.md",
+                                        line_number=idx + 1,
+                                        snippet=line.strip()
+                                    ))
+                        if line.strip() == "":
+                            is_attendee_line = False
 
             for chunk in chunk_text("\n".join(notes_lines)):
                 self.raw_chunks.append({
@@ -421,6 +467,7 @@ class GapDetector:
         mentioned_names = {m.stakeholder_name for m in self.context.meeting_mentions}
         registered_names = set(self.context.stakeholders.keys())
 
+        # --- RULE 1: MISSING STAKEHOLDER (Inside execute_audit_checks) ---
         for name in mentioned_names:
             if name not in registered_names and name:
                 mentions = [m for m in self.context.meeting_mentions if m.stakeholder_name == name]
@@ -437,14 +484,18 @@ class GapDetector:
                 else:
                     confidence = "Low"
 
+                # ADDED: Unique ID generation for the finding
+                f_id = f"GAP-MISSING-{name.replace(' ', '-').upper()}"
+
                 findings.append(GapFinding(
+                    finding_id=f_id,  # Ensure this matches your model field name
                     gap_category="MISSING STAKEHOLDER",
                     stakeholder_name=name,
                     severity="High",
                     confidence=confidence,
-                    observed_gap=f"Stakeholder '{name}' is driving program parameters or listed in meeting minutes but has zero representation in the official Stakeholder Register.",
-                    practical_impact=f"Cross-functional governance lines risk severe communications disruption and unmonitored scope drift due to omission of technical or executive authority.",
-                    recommended_action=f"Add '{name}' to the official Stakeholder Register, designate an internal team owner, and define communication boundaries.",
+                    observed_gap=f"Stakeholder '{name}' is driving program parameters...",
+                    practical_impact="Cross-functional governance lines risk severe communications disruption...",
+                    recommended_action=f"Add '{name}' to the official Stakeholder Register...",
                     primary_deterministic_evidence=primary_evidence,
                     vector_evidence_queries=[f"{name} meeting involvement role architecture"]
                 ))
@@ -484,16 +535,21 @@ class GapDetector:
 
                 if is_gap:
                     anomaly_desc = f"High-influence project owner '{stakeholder.name}' " + " and ".join(reasons) + "."
+
+                    # Added unique ID generation
+                    f_id = f"GAP-EXEC-{stakeholder.name.replace(' ', '-').upper()}"
+
                     findings.append(GapFinding(
+                        finding_id=f_id,  # REQUIRED
                         gap_category="STRATEGIC EXECUTION GAP",
                         stakeholder_name=stakeholder.name,
                         severity="High",
                         confidence="High" if not actions else "Medium",
                         observed_gap=anomaly_desc,
-                        practical_impact="Stewardship misalignment risks sudden approval blockages, delivery delays, and critical failure in strategic consensus tracking.",
-                        recommended_action=f"Refine strategy mapping entries for '{stakeholder.name}' to insert concrete bi-weekly 1-on-1 reviews with clear owners assigned.",
+                        practical_impact="...",
+                        recommended_action=f"...",
                         primary_deterministic_evidence=primary_evidence,
-                        vector_evidence_queries=[f"{stakeholder.name} strategy framework engagement coverage plan"]
+                        vector_evidence_queries=[f"{stakeholder.name} strategy framework"]
                     ))
 
         # --- RULE 3: RECURRENT CONCERN MISMATCH ---
@@ -510,14 +566,19 @@ class GapDetector:
 
             if not has_coverage:
                 primary_evidence = [f"[{concern.source_artifact} Line {concern.line_number}]: '{concern.snippet}'"]
+
+                # Added unique ID generation
+                f_id = f"GAP-CONCERN-{name.replace(' ', '-').upper()}-{concern.line_number}"
+
                 findings.append(GapFinding(
+                    finding_id=f_id,  # REQUIRED
                     gap_category="RECURRENT CONCERN MISMATCH",
                     stakeholder_name=name,
                     severity=concern.severity,
                     confidence="High",
-                    observed_gap=f"Active risk vector classification ('{concern.normalized_category.upper()}') flagged by '{name}' has zero tracking or mitigation steps inside current engagement plans.",
-                    practical_impact="Repetitive technical or architecture friction points compound systemic administrative drag and degrade deployment velocity.",
-                    recommended_action=f"Formally bridge this gap by mapping the '{concern.normalized_category}' concern to a verified milestone deliverable stream.",
+                    observed_gap=f"Active risk vector classification ('{concern.normalized_category.upper()}') flagged by '{name}' has zero tracking.",
+                    practical_impact="Repetitive technical or architecture friction points compound systemic administrative drag.",
+                    recommended_action=f"Formally bridge this gap by mapping the '{concern.normalized_category}' concern to a milestone.",
                     primary_deterministic_evidence=primary_evidence,
                     vector_evidence_queries=[f"{name} {concern.normalized_category} risk tracking mitigation"]
                 ))
@@ -525,31 +586,11 @@ class GapDetector:
         return findings
 
 
-# --- ORCHESTRATION LAYER ---
-def run_automated_pipeline() -> str:
-    print("PIPELINE STARTED")
-
-    print("STEP 1: Normalizing Stakeholders and Concerns")
-    normalizer = CorporateTaxonomyNormalizer()
-
-    print("STEP 2: Ingesting Raw Data")
-    context = StructuredProjectContext(normalizer=normalizer)
-    context.ingest_data()
-
-    print("STEP 3: Building Vector Index")
-    store = SimpleVectorStore()
-    store.build_indices(context.raw_chunks)
-
-    print("STEP 4: Executing Gap Detection")
-    detector = GapDetector(context, store)
-    internal_findings = detector.execute_audit_checks()
-
-    print("STEP 5: Synthesizing Executive Stakeholder Gap Report")
+def compile_raw_payload(internal_findings: List[GapFinding], store: SimpleVectorStore) -> List[dict]:
     compiled_raw_payload = []
     for f in internal_findings:
-        print(f" -> Found {len(f.primary_deterministic_evidence)} deterministic evidence items.")
-        print(f" -> Found {len(f.vector_evidence_queries)} vector evidence queries.")
-        vector_support = store.search(f.vector_evidence_queries[0], top_k=1)
+        # Use the passed store variable for vector lookups
+        vector_support = store.search(f.vector_evidence_queries[0], top_k=1) if f.vector_evidence_queries else []
 
         combined_evidence_items = []
         for pe in f.primary_deterministic_evidence:
@@ -571,63 +612,125 @@ def run_automated_pipeline() -> str:
             "recommended_action": f.recommended_action,
             "evidence": combined_evidence_items
         })
+    return compiled_raw_payload
 
-    print(" -> Generating Executive Stakeholder Gap Report")
+def synthesize_report_with_llm(compiled_raw_payload: List[dict]) -> ExecutiveStakeholderGapReport:
+    # Use the globally configured client and capability flag
     if is_vector_search_enabled:
         try:
             response = client.beta.chat.completions.parse(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system",
-                     "content": "You are an expert Senior Project Leader and Complexity Translator. Synthesize structural program audit rules and deterministic gaps into crisp corporate summaries. Do not extrapolate data outside the verified findings structure."},
-                    {"role": "user",
-                     "content": f"Review these calculated stakeholder program management gaps and produce the clean final structured synthesis report:\n{json.dumps(compiled_raw_payload, indent=2)}"}
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert Senior Project Leader and Stakeholder Gap Audit Manager. "
+                            "Synthesize deterministic gaps into crisp corporate summaries. "
+                            "Do not extrapolate data outside the verified findings structure."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Review these calculated stakeholder program management gaps and produce the clean final structured synthesis report:\n{json.dumps(compiled_raw_payload, indent=2)}"
+                    }
                 ],
                 response_format=ExecutiveStakeholderGapReport,
                 temperature=0.1
             )
             structured_report = response.choices[0].message.parsed
-        except Exception:
+        except Exception as e:
+            print(f" -> LLM parsing failed due to error: {e}. Slipping into fallback framework.")
             structured_report = fallback_synthesis(compiled_raw_payload)
     else:
+        print(" -> Vector Search/API Key disabled. Utilizing native fallback framework.")
         structured_report = fallback_synthesis(compiled_raw_payload)
 
+    return structured_report
+
+
+def generate_executive_summary(structured_report: ExecutiveStakeholderGapReport) -> str:
+    print(f" -> Re-applying structure and saving report to disk.")
+
+    # Correctly access 'findings' instead of 'categories'
+    total_findings = len(structured_report.findings)
+
     lines = [
-        "==========================================================================",
-        "                     STAKEHOLDER GAP AUDIT REPORT                         ",
-        f"                     GENERATED: {today.upper()}                          ",
-        "==========================================================================",
-        "\n### EXECUTIVE SUMMARY ###",
+        "================================================================================",
+        "STAKEHOLDER ANALYSIS REPORT",
+        f"Report Date: {today}",
+        f"Summary: Verified {total_findings} stakeholder findings.",
+        "================================================================================",
+        "",
+        "EXECUTIVE SUMMARY:",
         structured_report.executive_summary,
-        "\n" + "-" * 74
+        "",
+        "DETAILED FINDINGS BY CATEGORY",
+        ""
     ]
-    for cat in structured_report.categories:
-        lines.extend([
-            f"\nGAP CATEGORY       : {cat.gap_category}",
-            f"TARGET OWNER       : {cat.stakeholder_name}",
-            f"SEVERITY LEVEL     : {cat.severity} | CONFIDENCE: {cat.confidence}",
-            f"OBSERVED ANOMALY   : {cat.observed_gap}",
-            f"OPERATIONAL IMPACT : {cat.practical_impact}",
-            f"RECOMMENDED ACTION : {cat.recommended_action}",
-            "\nFOUNDATIONAL EVIDENCE PASSAGES:"
-        ])
-        for ev in cat.evidence:
+
+    # Iterate over 'findings'
+    for finding in structured_report.findings:
+        lines.append(f"{finding.gap_category}:")
+        lines.append(f"Stakeholder Name: {finding.stakeholder_name}")
+        lines.append(f"Observed Anomaly: {finding.observed_gap}")
+        lines.append(f"Operational Impact: {finding.practical_impact}")
+        lines.append(f"Recommendation: {finding.recommended_action}")
+        lines.append("")
+        lines.append("Foundational Evidence Passages:")
+        for ev in finding.evidence:
             lines.append(f"  - [{ev.source}]: \"{ev.snippet[:140]}\"")
-        lines.append("\n" + "-" * 74)
+        lines.append("")
 
     final_report_text = "\n".join(lines)
     stakeholder_gap_report_path.write_text(final_report_text, encoding="utf-8")
+
+    return final_report_text
+
+
+# --- ORCHESTRATION LAYER ---
+def run_automated_pipeline() -> str:
+    print("PIPELINE STARTED")
+
+    print("STEP 1: Normalizing Stakeholders and Concerns.")
+    normalizer = CorporateTaxonomyNormalizer()
+
+    print("STEP 2: Ingesting Raw Data.")
+    context = StructuredProjectContext(normalizer=normalizer)
+    context.ingest_data()
+
+    print("STEP 3: Building Vector Index.")
+    store = SimpleVectorStore()
+    store.build_indices(context.raw_chunks)
+
+    print("STEP 4: Executing Gap Detection.")
+    detector = GapDetector(context, store)
+    internal_findings = detector.execute_audit_checks()
+
+    print("STEP 5: Compiling Raw Payload.")
+    print(f" -> Found {len(internal_findings)} internal findings.")
+    # Pass both variables into the compiler
+    raw_payload = compile_raw_payload(internal_findings, store)
+
+    print("STEP 6: Synthesizing AI Report Narrative.")
+    structured_report = synthesize_report_with_llm(raw_payload)
+
+    print("STEP 7: Generating Executive Summary.")
+    # Assign the returned text directly
+    final_report_text = generate_executive_summary(structured_report)
 
     print("PIPELINE COMPLETED")
     return final_report_text
 
 
 def fallback_synthesis(raw_findings: List[Dict]) -> ExecutiveStakeholderGapReport:
-    categories = [StakeholderGapReport(**f) for f in raw_findings]
+    # 'findings' matches the ExecutiveStakeholderGapReport model field
+    findings = [StakeholderGapReport(**f) for f in raw_findings]
     return ExecutiveStakeholderGapReport(
-        executive_summary="Automated structural diagnostics identified key stakeholder register exclusions, strategic alignment gaps, and untracked architectural concerns requiring program management mitigation.",
-        categories=categories
+        executive_summary="Automated structural diagnostics identified key stakeholder register exclusions, strategic alignment gaps, and untracked architectural concerns.",
+        findings=findings
     )
+
+
 
 
 # --- STREAMLIT DASHBOARD INTERFACE ---
