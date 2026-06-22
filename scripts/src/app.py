@@ -33,6 +33,8 @@ for folder in folder_paths:
 stakeholder_gap_report_path = output_folder / "STAKEHOLDER_GAP_REPORT.txt"
 database_file_destination = vector_store_folder / "global_vector_store.json"
 
+KNOWN_STAKEHOLDERS = {"Liam Patel", "Fatima Al-Sayed", "John Doe"}
+
 # Populate sample data if files do not exist
 if not stakeholder_register_path.exists():
     pd.DataFrame([
@@ -75,6 +77,10 @@ class StreamlitStdoutRedirector:
         self.output_str = ""
         self.max_chars = max_chars
 
+    def reset(self):
+        self.output_str = ""
+        self.placeholder.empty()
+
     def write(self, text):
         if not text:
             return
@@ -83,6 +89,7 @@ class StreamlitStdoutRedirector:
             self.output_str = self.output_str[-self.max_chars:]
         self.placeholder.code(self.output_str, language="text")
 
+    # Add this exact method to satisfy sys.stdout
     def flush(self):
         pass
 
@@ -274,18 +281,20 @@ class SimpleVectorStore:
 
 # --- PIPELINE LAYER: TAXONOMY & NORMALIZATION ---
 class CorporateTaxonomyNormalizer:
-    """Provides advanced multi-entity normalization for both identity variations and concern classifications."""
-
     def __init__(self):
+        self.blocklist = {"Actions", "Steering Committee", "Security Review", "Discussion"}
         self.identity_map = {
-            "head of finance": "Maria Chen",
-            "finance director": "Maria Chen",
-            "alicia": "Alicia Sponsor",
-            "liam": "Liam Patel",
-            "priya": "Priya Sharma",
-            "david": "David Vance",
-            "helen": "Helen Brooks",
-            "fatima": "Fatima Al-Sayed"
+            "maria chen": "Maria Chen",
+            "david": "David Okafor", # Map "David" to the name in your CSV
+            "david okafor": "David Okafor",
+            "priya": "Priya Nair", # Map "Priya" to the name in your CSV
+            "priya nair": "Priya Nair",
+            "helen brooks": "Helen Brooks",
+            "jonas": "Jonas Weber",
+            "jonas weber": "Jonas Weber",
+            "fatima": "Fatima Hassan", # Map "Fatima" to the name in your CSV
+            "fatima hassan": "Fatima Hassan",
+            "fatima al-sayed": "Fatima Hassan"
         }
 
         self.concern_taxonomy = {
@@ -298,6 +307,10 @@ class CorporateTaxonomyNormalizer:
         }
 
     def normalize_name(self, name: str) -> str:
+        # If the name is in the blocklist, force it to return an empty string
+        if name.title() in self.blocklist:
+            return ""
+
         cleaned = str(name).strip().lower().replace("-", " ")
         cleaned = re.sub(r'[:\s*•\-\d)]', ' ', cleaned)
         cleaned = " ".join(cleaned.split())
@@ -332,7 +345,12 @@ class StructuredProjectContext:
         self.raw_chunks: List[Dict] = []
 
     def ingest_data(self):
-        # Pass 1: Dynamic Discovery Sweep Across Registers
+
+
+        for known_name in KNOWN_STAKEHOLDERS:
+            self.discovered_names.add(known_name)
+
+        # 1. Register Discovery (Trusted Source)
         if stakeholder_register_path.exists():
             print(" -> Pass 1: Discovering names from register.")
             df = pd.read_csv(stakeholder_register_path)
@@ -340,97 +358,129 @@ class StructuredProjectContext:
                 n = str(row.get("name", "")).strip()
                 if n: self.discovered_names.add(self.normalizer.normalize_name(n))
 
+        # 2. Plan Discovery (Update for Markdown Headers)
         if stakeholder_plan_path.exists():
             print(" -> Pass 1: Discovering names from plan.")
-            for line in stakeholder_plan_path.read_text(encoding="utf-8").split("\n"):
-                if line.strip().startswith("-") and ":" in line:
-                    n = line.split(":", 1)[0].replace("-", "").strip()
-                    if n: self.discovered_names.add(self.normalizer.normalize_name(n))
+            content = stakeholder_plan_path.read_text(encoding="utf-8")
+            # This regex looks for names between "###" and "—"
+            matches = re.findall(r"###\s+(.*?)\s+—", content)
+            for raw_name in matches:
+                norm = self.normalizer.normalize_name(raw_name)
+                if norm: self.discovered_names.add(norm)
 
+        # 3. Meeting Discovery (STRICT: ONLY the Attendees line)
         if meeting_notes_path.exists():
-            print(" -> Pass 1: Discovering names from meetings.")
+            print(" -> Pass 1: Discovering names from meeting notes.")
             for line in meeting_notes_path.read_text(encoding="utf-8").split("\n"):
-                if "attendees:" in line.lower():
-                    for name_part in line.split(":", 1)[1].split(","):
+                if line.lower().startswith("attendees:"):
+                    # Extract only the content after "attendees:"
+                    raw_attendees = line.split(":", 1)[1]
+                    for name_part in raw_attendees.split(","):
                         n = name_part.strip()
-                        if n: self.discovered_names.add(self.normalizer.normalize_name(n))
+                        if n:
+                            norm = self.normalizer.normalize_name(n)
+                            # Only add if it's not a common project term
+                            # You could add a blacklist here if needed
+                            if norm not in ["Actions", "Steering Committee", "Security Review"]:
+                                self.discovered_names.add(norm)
 
-        # 1. PARSER SPECIFIC: Stakeholder Register (CSV Domain Model Engine)
+        # 1. PARSER SPECIFIC: Stakeholder Register
         if stakeholder_register_path.exists():
-            print(" -> Pass 2: Chunking register.")
+            print(" -> Pass 2: Ingesting Stakeholder Register.")
             df = pd.read_csv(stakeholder_register_path)
-            for idx, row in df.iterrows():
-                raw_name = str(row.get("name", "")).strip()
+            for _, row in df.iterrows():
+                raw_name = str(row.get("Stakeholder Name", "")).strip()
                 if not raw_name: continue
+
                 norm_name = self.normalizer.normalize_name(raw_name)
+
+                # FIX: Add the missing required fields
                 self.stakeholders[norm_name] = Stakeholder(
+                    stakeholder_id=f"STK-{norm_name.replace(' ', '-').upper()}",  # Generated ID
                     name=norm_name,
-                    role=str(row.get("role", "Unknown")),
-                    influence=str(row.get("influence", "Medium")),
-                    interest=str(row.get("interest", "Medium")),
-                    desired_engagement=str(row.get("desired_engagement", "Keep Informed"))
+                    role=str(row.get("Role", "Unknown")),
+                    influence=str(row.get("Influence", "Medium")),
+                    interest=str(row.get("Interest", "Medium")),
+                    desired_engagement=str(row.get("Preferred Communication", "Keep Informed")),
+                    source_artifact="Stakeholder_Register.csv"  # Required field
                 )
+
                 self.raw_chunks.append({
-                    "text": f"Register Row entry target: {raw_name} with role {row.get('role')}",
-                    "metadata": {"source": "Stakeholder_Register.csv", "type": "Register", "owner": norm_name,
-                                 "line": idx}
+                    "text": f"Register entry: {raw_name}, Role: {row.get('Role')}, Dept: {row.get('Department')}",
+                    "metadata": {"source": "Stakeholder_Register.csv", "type": "Register"}
                 })
 
-        # 2. PARSER SPECIFIC: Engagement Plan (Strict Bullet Syntax)
+        # 2. PARSER SPECIFIC: Engagement Plan
         if stakeholder_plan_path.exists():
-            print(" -> Pass 2: Chunking plan.")
-            plan_lines = stakeholder_plan_path.read_text(encoding="utf-8").split("\n")
-            for idx, line in enumerate(plan_lines):
-                if line.strip().startswith("-") and ":" in line:
-                    parts = line.split(":", 1)
-                    raw_target = parts[0].replace("-", "").strip()
-                    norm_target = self.normalizer.normalize_name(raw_target)
-                    strategy_text = parts[1].strip()
+            print(" -> Pass 2: Ingesting Engagement Plan.")
+            lines = stakeholder_plan_path.read_text(encoding="utf-8").split("\n")
+            current_stakeholder = None
 
-                    has_owner = any(x in strategy_text.lower() for x in ["owner:", "lead", "pm"])
-                    has_cadence = any(
-                        x in strategy_text.lower() for x in ["cadence:", "weekly", "monthly", "bi-weekly"])
+            for idx, line in enumerate(lines):
+                # Look for the header format "### Name — Role"
+                header_match = re.search(r"###\s+(.*?)\s+—", line)
+                if header_match:
+                    raw_name = header_match.group(1).strip()
+                    current_stakeholder = self.normalizer.normalize_name(raw_name)
+                    continue  # Move to next line
 
-                    self.engagement_actions.append(EngagementAction(
-                        action_strategy=strategy_text,
-                        stakeholder_name=norm_target,
-                        has_owner=has_owner,
-                        has_cadence=has_cadence,
-                        source_artifact="Stakeholder_Engagement_Plan.md",
-                        line_number=idx + 1,
-                        snippet=line.strip()
-                    ))
-            for chunk in chunk_text("\n".join(plan_lines)):
-                self.raw_chunks.append({
-                    "text": chunk,
-                    "metadata": {"source": "Stakeholder_Engagement_Plan.md", "type": "Strategy",
-                                 "section": "Execution Plan"}
-                })
+                # If we are under a stakeholder, look for actions
+                if current_stakeholder and line.strip().startswith("-"):
+                    strategy_text = line.replace("-", "").strip()
+
+                    # Only add if it's an actual action, not a label
+                    if strategy_text.lower() not in ["engagement approach:", "actions:", "desired outcome:"]:
+                        has_owner = any(x in strategy_text.lower() for x in ["owner:", "lead", "pm"])
+                        has_cadence = any(
+                            x in strategy_text.lower() for x in ["weekly", "bi-weekly", "monthly", "quarterly"])
+
+                        self.engagement_actions.append(EngagementAction(
+                            action_strategy=strategy_text,
+                            stakeholder_name=current_stakeholder,
+                            has_owner=has_owner,
+                            has_cadence=has_cadence,
+                            source_artifact="Stakeholder_Engagement_Plan.md",
+                            line_number=idx + 1,
+                            snippet=line.strip()
+                        ))
 
         # 3. PARSER SPECIFIC: Meeting Notes (Context-Rich Sweep)
-                # 3. PARSER SPECIFIC: Meeting Notes (Context-Rich Sweep)
         if meeting_notes_path.exists():
-            print(" -> Pass 2: Chunking notes.")
+            print(" -> Pass 2: Ingesting Meeting Notes.")
             notes_lines = meeting_notes_path.read_text(encoding="utf-8").split("\n")
             is_attendee_line = False
 
             for idx, line in enumerate(notes_lines):
+                # 1. Skip structural markdown headers
+                if line.strip().startswith("#"):
+                    continue
+
+                # 2. Reset attendee status on empty lines
+                if not line.strip():
+                    is_attendee_line = False
+                    continue
+
                 lowered_line = line.lower()
                 if "attendees:" in lowered_line:
                     is_attendee_line = True
 
                 for target_name in self.discovered_names:
-                    if target_name.lower() in lowered_line:
-                        # Determine attendee status
-                        is_att = is_attendee_line and (
-                                    target_name.lower() in lowered_line.split("attendees:")[-1])
+                    # Guard: Skip empty or invalid names
+                    if not target_name or target_name in self.normalizer.blocklist:
+                        continue
+
+                    # Use Regex Word Boundaries (\b) for precise matching
+                    pattern = rf"\b{re.escape(target_name)}\b"
+
+                    if re.search(pattern, line, re.IGNORECASE):
+                        # Determine attendee status (only if on the "attendees:" line)
+                        is_att = is_attendee_line and (target_name.lower() in lowered_line.split("attendees:")[-1])
 
                         # --- LOGIC TO DEFINE MENTION TYPE ---
                         if is_att:
                             m_type = "attendee"
                         elif any(k in lowered_line for k in
-                                 ["concern", "anxiety", "risk", "issue", "flagged", "stalled",
-                                  "vulnerability"]):
+                                 ["concern", "anxiety", "risk", "issue", "flagged", "stalled", "vulnerability"]):
                             m_type = "concern"
                         else:
                             m_type = "discussion"
@@ -445,7 +495,7 @@ class StructuredProjectContext:
                             mention_type=m_type
                         ))
 
-                        # Keep your existing concern logic if you still want to populate self.concerns separately
+                        # Keep concern logic, but only if it's a valid stakeholder name
                         if m_type == "concern":
                             category = self.normalizer.classify_concern(line)
                             severity = "High" if "architecture" in lowered_line or "blockage" in lowered_line else "Medium"
@@ -458,9 +508,8 @@ class StructuredProjectContext:
                                 line_number=idx + 1,
                                 snippet=line.strip()
                             ))
-                if line.strip() == "":
-                    is_attendee_line = False
 
+            # Create chunks for vector search
             for chunk in chunk_text("\n".join(notes_lines)):
                 self.raw_chunks.append({
                     "text": chunk,
@@ -470,145 +519,155 @@ class StructuredProjectContext:
 
 # --- PIPELINE LAYER: DETERMINISTIC AUDIT RULES ENGINE ---
 class GapDetector:
-    """Runs programmatic validations generating decoupled GapFinding models grounded in structural evidence."""
-
-    def __init__(self, context: StructuredProjectContext, store: SimpleVectorStore):
+    def __init__(self, context: StructuredProjectContext, store: SimpleVectorStore, normalizer: CorporateTaxonomyNormalizer):
         self.context = context
         self.store = store
+        self.normalizer = normalizer # <--- THIS IS THE MISSING LINE
+
+    def generate_strategic_heatmap(self) -> List[Dict]:
+        print(" -> Generating Strategic Heatmap.")
+        heatmap_data = []
+        for name, stakeholder in self.context.stakeholders.items():
+            concern_count = len([c for c in self.context.concerns if c.stakeholder_name == name])
+
+            # Risk Level: High Influence + Multiple Concerns = CRITICAL
+            if stakeholder.influence == "High" and concern_count > 0:
+                risk_level = "CRITICAL - Immediate Action Required"
+            elif concern_count > 0:
+                risk_level = "ELEVATED - Requires Attention"
+            else:
+                risk_level = "STABLE"
+
+            heatmap_data.append({
+                "stakeholder": name,
+                "influence": stakeholder.influence,
+                "concern_count": concern_count,
+                "risk_level": risk_level
+            })
+        return heatmap_data
+
 
     def execute_audit_checks(self) -> List[GapFinding]:
-        print(f" -> Found {len(self.context.raw_chunks)} chunks to analyze.")
-        print(f" -> Found {len(self.context.meeting_mentions)} mentions to analyze.")
-        print(f" -> Found {len(self.context.concerns)} concerns to analyze.")
-        print(f" -> Found {len(self.context.engagement_actions)} engagement actions to analyze.")
-        print(f" -> Found {len(self.context.stakeholders)} stakeholders to analyze.")
         findings: List[GapFinding] = []
 
         # --- RULE 1: MISSING STAKEHOLDER ---
+        print(" -> Executing Rule 1: Missing Stakeholder Detection.")
         mentioned_names = {m.stakeholder_name for m in self.context.meeting_mentions}
         registered_names = set(self.context.stakeholders.keys())
 
-        # --- RULE 1: MISSING STAKEHOLDER (Inside execute_audit_checks) ---
         for name in mentioned_names:
             if name not in registered_names and name:
                 mentions = [m for m in self.context.meeting_mentions if m.stakeholder_name == name]
                 primary_evidence = [f"[{m.source_artifact} Line {m.line_number}]: '{m.context_snippet}'" for m in
                                     mentions]
 
-                is_attendee = any(m.is_explicit_attendee for m in mentions)
-                has_substance = any(any(c.stakeholder_name == name for c in self.context.concerns) for m in mentions)
-
-                if len(mentions) > 1 and is_attendee:
-                    confidence = "High"
-                elif is_attendee or has_substance:
-                    confidence = "Medium"
-                else:
-                    confidence = "Low"
-
-                # ADDED: Unique ID generation for the finding
                 f_id = f"GAP-MISSING-{name.replace(' ', '-').upper()}"
-
                 findings.append(GapFinding(
-                    finding_id=f_id,  # Ensure this matches your model field name
+                    finding_id=f_id,
                     gap_category="MISSING STAKEHOLDER",
                     stakeholder_name=name,
                     severity="High",
-                    confidence=confidence,
-                    observed_gap=f"Stakeholder '{name}' is driving program parameters...",
-                    practical_impact="Cross-functional governance lines risk severe communications disruption...",
-                    recommended_action=f"Add '{name}' to the official Stakeholder Register...",
+                    confidence="High" if len(mentions) > 1 else "Medium",
+                    observed_gap=f"Stakeholder '{name}' is active in meeting notes but is not present in the Stakeholder Register.",
+                    practical_impact="Lack of formal oversight for active project participants creates a governance blind spot.",
+                    recommended_action=f"Add '{name}' to the Stakeholder Register and assign a communication owner.",
                     primary_deterministic_evidence=primary_evidence,
-                    vector_evidence_queries=[f"{name} meeting involvement role architecture"]
+                    vector_evidence_queries=[f"{name} role in project"]
                 ))
 
+
         # --- RULE 2: STRATEGIC EXECUTION GAP ---
+        print(" -> Executing Rule 2: Strategic Execution Gap Detection.")
         for name, stakeholder in self.context.stakeholders.items():
-            if stakeholder.influence.lower() == "high":
-                actions = [a for a in self.context.engagement_actions if a.stakeholder_name == name]
+            # Normalize the lookup name to ensure it matches exactly how the Action was stored
+            norm_lookup = self.normalizer.normalize_name(name)
 
-                is_gap = False
-                reasons = []
-                primary_evidence = []
+            # Filter actions by checking if the action's stakeholder name matches our normalized name
+            actions = [
+                a for a in self.context.engagement_actions
+                if self.normalizer.normalize_name(a.stakeholder_name) == norm_lookup
+            ]
 
-                if not actions:
+            is_gap = False
+            reasons = []
+            primary_evidence = [f"[{a.source_artifact} Line {a.line_number}]: '{a.snippet}'" for a in actions]
+
+            # 1. Actionability Gap
+            if not actions:
+                is_gap = True
+                reasons.append("has no actionable engagement entries in the strategy plan")
+            else:
+                combined_strategy = " ".join([a.action_strategy.lower() for a in actions])
+
+                # 2. Ownership Gap (Check if anyone is actually assigned to handle this stakeholder)
+                if not any(a.has_owner for a in actions):
                     is_gap = True
-                    reasons.append("has no actionable engagement entries within the strategy files")
-                    primary_evidence = [
-                        f"Stakeholder Register record confirms High-Influence status for '{stakeholder.name}'."]
-                else:
-                    primary_evidence = [f"[{a.source_artifact} Line {a.line_number}]: '{a.snippet}'" for a in actions]
-                    combined_text = " ".join([a.action_strategy.lower() for a in actions])
+                    reasons.append("lacks an explicit engagement owner")
 
-                    if any(x in combined_text for x in ["existing governance", "generic channels", "vague"]):
+                # 3. Cadence Gap (Tiered Frequency Check)
+                strategy_lower = combined_strategy.lower()
+                if stakeholder.desired_engagement == "Manage Closely":
+                    # Manage Closely must have Weekly or Bi-Weekly
+                    if not any(x in strategy_lower for x in ["weekly", "bi-weekly"]):
                         is_gap = True
                         reasons.append(
-                            "relies completely on non-specific, passive management channels ('existing governance channels')")
+                            "requires high-frequency 'Manage Closely' engagement, but only low-frequency cadence is defined")
 
-                    missing_controls = []
-                    if not any(a.has_owner for a in actions):
-                        missing_controls.append("lacks an explicit strategy action owner")
-                    if not any(a.has_cadence for a in actions):
-                        missing_controls.append("omits an operational execution cadence")
-
-                    if missing_controls:
+                elif stakeholder.desired_engagement == "Keep Satisfied":
+                    # Keep Satisfied must be at least Monthly
+                    if not any(x in strategy_lower for x in ["weekly", "bi-weekly", "monthly"]):
                         is_gap = True
-                        reasons.append(f"contains gaps in programmatic rigor ({', '.join(missing_controls)})")
+                        reasons.append("requires 'Keep Satisfied' engagement, but cadence is insufficient")
 
-                if is_gap:
-                    anomaly_desc = f"High-influence project owner '{stakeholder.name}' " + " and ".join(reasons) + "."
-
-                    # Added unique ID generation
-                    f_id = f"GAP-EXEC-{stakeholder.name.replace(' ', '-').upper()}"
-
-                    findings.append(GapFinding(
-                        finding_id=f_id,  # REQUIRED
-                        gap_category="STRATEGIC EXECUTION GAP",
-                        stakeholder_name=stakeholder.name,
-                        severity="High",
-                        confidence="High" if not actions else "Medium",
-                        observed_gap=anomaly_desc,
-                        practical_impact="...",
-                        recommended_action=f"...",
-                        primary_deterministic_evidence=primary_evidence,
-                        vector_evidence_queries=[f"{stakeholder.name} strategy framework"]
-                    ))
+            if is_gap:
+                f_id = f"GAP-EXEC-{name.replace(' ', '-').upper()}"
+                findings.append(GapFinding(
+                    finding_id=f_id,
+                    gap_category="STRATEGIC EXECUTION GAP",
+                    stakeholder_name=name,
+                    severity="High",
+                    confidence="High",
+                    observed_gap=f"Stakeholder '{name}' " + " and ".join(
+                        reasons) + ".",
+                    practical_impact="Failure to maintain the appropriate engagement rigor for high-influence stakeholders directly threatens program continuity and strategic consensus.",
+                    recommended_action=f"Update the Engagement Plan to assign a clear owner and increase frequency for '{name}' to match their '{stakeholder.desired_engagement}' status.",
+                    primary_deterministic_evidence=primary_evidence,
+                    vector_evidence_queries=[f"{name} engagement strategy ownership frequency"]
+                ))
 
         # --- RULE 3: RECURRENT CONCERN MISMATCH ---
+        print(" -> Executing Rule 3: Recurrent Concern Mismatch Detection.")
         for concern in self.context.concerns:
             name = concern.stakeholder_name
-            actions = [a for a in self.context.engagement_actions if a.stakeholder_name == name]
+            # Find actions for this stakeholder and check if ANY action covers the concern category
+            matching_actions = [
+                a for a in self.context.engagement_actions
+                if a.stakeholder_name == name and
+                   self.context.normalizer.classify_concern(a.action_strategy) == concern.normalized_category
+            ]
 
-            has_coverage = False
-            for action in actions:
-                action_target_category = self.context.normalizer.classify_concern(action.action_strategy)
-                if action_target_category == concern.normalized_category and action_target_category != "general operational friction":
-                    has_coverage = True
-                    break
-
-            if not has_coverage:
-                primary_evidence = [f"[{concern.source_artifact} Line {concern.line_number}]: '{concern.snippet}'"]
-
-                # Added unique ID generation
+            if not matching_actions:
                 f_id = f"GAP-CONCERN-{name.replace(' ', '-').upper()}-{concern.line_number}"
-
                 findings.append(GapFinding(
-                    finding_id=f_id,  # REQUIRED
+                    finding_id=f_id,
                     gap_category="RECURRENT CONCERN MISMATCH",
                     stakeholder_name=name,
                     severity=concern.severity,
                     confidence="High",
-                    observed_gap=f"Active risk vector classification ('{concern.normalized_category.upper()}') flagged by '{name}' has zero tracking.",
-                    practical_impact="Repetitive technical or architecture friction points compound systemic administrative drag.",
-                    recommended_action=f"Formally bridge this gap by mapping the '{concern.normalized_category}' concern to a milestone.",
-                    primary_deterministic_evidence=primary_evidence,
-                    vector_evidence_queries=[f"{name} {concern.normalized_category} risk tracking mitigation"]
+                    observed_gap=f"The concern '{concern.normalized_category}' flagged by '{name}' has no mapped action in the engagement plan.",
+                    practical_impact="Unaddressed recurrent concerns lead to project friction and reduced stakeholder trust.",
+                    recommended_action=f"Add a specific mitigation action for '{concern.normalized_category}' to the Engagement Plan.",
+                    primary_deterministic_evidence=[
+                        f"[{concern.source_artifact} Line {concern.line_number}]: '{concern.snippet}'"],
+                    vector_evidence_queries=[f"{name} {concern.normalized_category} mitigation steps"]
                 ))
 
         return findings
 
 
-def compile_raw_payload(internal_findings: List[GapFinding], store: SimpleVectorStore) -> List[dict]:
+def compile_raw_payload(internal_findings: List[GapFinding], store: SimpleVectorStore, heatmap: List[Dict]) -> Dict:
     compiled_raw_payload = []
+
     for f in internal_findings:
         # Use the passed store variable for vector lookups
         vector_support = store.search(f.vector_evidence_queries[0], top_k=1) if f.vector_evidence_queries else []
@@ -633,7 +692,11 @@ def compile_raw_payload(internal_findings: List[GapFinding], store: SimpleVector
             "recommended_action": f.recommended_action,
             "evidence": combined_evidence_items
         })
-    return compiled_raw_payload
+    return {
+        "findings": compiled_raw_payload,
+        "strategic_heatmap": heatmap
+    }
+
 
 def synthesize_report_with_llm(compiled_raw_payload: List[dict]) -> ExecutiveStakeholderGapReport:
     # Use the globally configured client and capability flag
@@ -645,9 +708,11 @@ def synthesize_report_with_llm(compiled_raw_payload: List[dict]) -> ExecutiveSta
                     {
                         "role": "system",
                         "content": (
-                            "You are an expert Senior Project Leader and Stakeholder Gap Audit Manager. "
-                            "Synthesize deterministic gaps into crisp corporate summaries. "
-                            "Do not extrapolate data outside the verified findings structure."
+                                "You are an expert Senior Program Leader. "
+                                "You are provided with stakeholder gap findings and a 'Strategic Risk Heatmap'. "
+                                "1. Use the Heatmap to identify the top 2-3 'CRITICAL' stakeholders. "
+                                "2. In your Executive Summary, explicitly name these stakeholders and explain why they are at risk based on their Influence vs. Concern count. "
+                                "3. Provide a clear prioritization plan."
                         )
                     },
                     {
@@ -677,9 +742,9 @@ def generate_executive_summary(structured_report: ExecutiveStakeholderGapReport)
 
     lines = [
         "================================================================================",
-        "STAKEHOLDER ANALYSIS REPORT",
+        "STAKEHOLDER ALIGNMENT REPORT",
         f"Report Date: {today}",
-        f"Summary: Verified {total_findings} stakeholder findings.",
+        f"Summary: Verified {total_findings} stakeholder alignment findings.",
         "================================================================================",
         "",
         "EXECUTIVE SUMMARY:",
@@ -733,13 +798,17 @@ def run_automated_pipeline() -> str:
         store.save(database_file_destination)
 
     print("STEP 4: Executing Gap Detection.")
-    detector = GapDetector(context, store)
+    detector = GapDetector(context, store, normalizer)
+
     internal_findings = detector.execute_audit_checks()
+
+    heatmap = detector.generate_strategic_heatmap()
 
     print("STEP 5: Compiling Raw Payload.")
     print(f" -> Found {len(internal_findings)} internal findings.")
-    # Pass both variables into the compiler
-    raw_payload = compile_raw_payload(internal_findings, store)
+
+    # STEP 5: Compiling Raw Payload (Pass the heatmap)
+    raw_payload = compile_raw_payload(internal_findings, store, heatmap)
 
     print("STEP 6: Synthesizing AI Report Narrative.")
     structured_report = synthesize_report_with_llm(raw_payload)
@@ -760,13 +829,10 @@ def fallback_synthesis(raw_findings: List[Dict]) -> ExecutiveStakeholderGapRepor
         findings=findings
     )
 
-
-
-
 # --- STREAMLIT DASHBOARD INTERFACE ---
-st.set_page_config(page_title="AI Stakeholder Gap Analysis", layout="wide")
-st.title("Stakeholder Gap Analysis")
-st.caption("Identify and mitigate stakeholder gaps in your organization's project delivery pipeline.")
+st.set_page_config(page_title="AI Stakeholder Alignment", layout="wide")
+st.title("Stakeholder Alignment Dashboard")
+st.caption("Real-time diagnostics to bridge the gap between project strategy and operational delivery.")
 st.markdown("---")
 
 col1, col2 = st.columns(2)
@@ -799,21 +865,24 @@ with col1:
     else:
         st.error(f"Data directory '{data_folder}' does not exist. Please create it and add your files.")
 
-    start_pipeline = st.button("Execute Stakeholder Gap Pipeline", use_container_width=True, type="primary")
+    start_pipeline = st.button("Execute Stakeholder Alignment Pipeline", use_container_width=True, type="primary")
 
     st.subheader("Pipeline Summary")
     console_logs = st.empty()
-    console_logs.info("Click 'Execute Stakeholder Gap Pipeline' button to begin.")
+    console_logs.info("Click 'Execute Stakeholder Alignment Pipeline' button to begin.")
 
 with col2:
     st.subheader("Report Workspace")
     report_placeholder = st.empty()
-    report_placeholder.info("The Stakeholder Gap Analysis will populate here upon synthesis.")
+    report_placeholder.info("The Stakeholder Alignment Report will populate here upon synthesis.")
 
     if start_pipeline:
+        console_logs.empty()
         redirector = StreamlitStdoutRedirector(console_logs)
+        # CLEAR the UI before the pipeline starts
+        redirector.reset()
 
-        with st.spinner("Processing Stakeholder Gap Analysis..."):
+        with st.spinner("Processing Stakeholder Alignment Pipeline..."):
             with contextlib.redirect_stdout(redirector):
                 final_narrative = run_automated_pipeline()
 
@@ -839,9 +908,9 @@ with col2:
                 )
 
                 st.download_button(
-                    label="Download Stakeholder Gap Report (.txt)",
+                    label="Download Stakeholder Alignment Report (.txt)",
                     data=final_narrative,
-                    file_name="stakeholder_gap_report.txt",
+                    file_name="stakeholder_alignment_report.txt",
                     mime="text/plain",
                     use_container_width=True
                 )

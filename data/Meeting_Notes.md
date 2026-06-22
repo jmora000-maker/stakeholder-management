@@ -11,6 +11,7 @@
     - David raised concern that operations teams may not be trained early enough for rollout.
     - Fatima noted customer support will need job aids and updated scripts before launch.
     - Jonas proposed a communication plan for impacted teams.
+    - John Doe suggested a new review process.
     
     ### Actions
     - Create first draft of communications plan.
