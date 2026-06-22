@@ -1,0 +1,40 @@
+STEP 1: Semantic Taxonomy & Identity Normalization
+The CorporateTaxonomyNormalizer establishes the system’s "Ontology." It resolves identity ambiguity by mapping various aliases (e.g., "Fatima Al-Sayed," "Fatima Hassan") to a single canonical_name. Simultaneously, it applies a concern_taxonomy—a multidimensional map that classifies unstructured complaints into project-critical buckets like "Audit Logging" or "Deployment Readiness."
+
+STEP 2: Multi-Pass Artifact Ingestion
+The StructuredProjectContext engine performs a three-tiered semantic scan:
+
+Discovery Pass: Executes a regex-based crawl across the register, engagement plan, and meeting notes to establish the total project population.
+
+Structural Parsing: Maps file-specific schemas (e.g., Markdown headers, CSV columns) into Pydantic-based data models (Stakeholder, EngagementAction).
+
+Contextual Sweep: Applies pattern matching with word-boundary awareness (\b) to extract not just names, but the intent of the mention (attendee, contributor, or concern).
+
+STEP 3: Vectorized RAG Foundation
+The SimpleVectorStore transforms project documentation into a high-dimensional vector space. By chunking documents with overlap and generating text-embedding-3-small vectors, the pipeline creates a semantic bridge. This enables the system to "remember" project history beyond the current file, allowing for cross-document query capabilities (e.g., finding the origin of a risk mentioned in meeting notes that exists in the strategy plan).
+
+STEP 4: Governance & Heatmap Logic
+The GapDetector acts as the deterministic audit engine. It performs two critical functions:
+
+Constraint Checking: Validates project governance rules—such as the mandatory mapping of every high-influence stakeholder to an owner and a specific engagement cadence.
+
+Risk Heatmap Generation: Computes a risk score for each stakeholder using a Influence × Concern_Volume matrix. It assigns a status (STABLE, ELEVATED, or CRITICAL) based on the intersection of the stakeholder's organizational weight and the number of unresolved architectural/process blockers linked to their name.
+
+STEP 5: Evidence-Based Payload Synthesis
+This step aggregates the structural audit findings with supporting evidence. It conducts RAG searches to pull in the most relevant project context (e.g., the specific line where a vendor handoff was discussed). This creates a "Contextual Evidence Bundle"—a JSON payload that provides the LLM with the deterministic finding plus the semantic context required to understand the issue’s impact.
+
+STEP 6: Expert-System LLM Synthesis
+The LLM (gpt-4o-mini) processes the JSON payload through a system-prompted "Senior Program Leader" persona. It synthesizes the data by:
+
+Prioritizing the Heatmap: It anchors the Executive Summary on the CRITICAL risk stakeholders.
+
+Bridging Business-Tech Gaps: It interprets the relationship between technical concerns (e.g., access control) and business stakeholder priorities (e.g., compliance).
+
+Actionable Synthesis: It converts audit discrepancies into a cohesive, priority-ranked narrative rather than a list of errors.
+
+STEP 7: Human-Readable Delivery
+The final stage converts the ExecutiveStakeholderGapReport Pydantic model into a structured, formal text report. It performs two outputs:
+
+Persistence: Writes to a standardized STAKEHOLDER_GAP_REPORT.txt for record-keeping.
+
+Visualization: Renders the narrative via Streamlit, providing you with a clean, scrollable executive brief and a "Download" trigger for offline review.

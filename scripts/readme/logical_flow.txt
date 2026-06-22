@@ -1,0 +1,12 @@
+The pipeline functions as a multi-stage funnel that progressively refines unstructured text into structured, high-value governance intelligence, now augmented with risk-based prioritization:
+
+The Logical Flow: From Data to Insight
+Ingestion & Structuring: Your raw files (CSV, Markdown, and Meeting Logs) serve as the input. The pipeline strips away the noise and normalizes entity names, turning loose text into a Relational Knowledge Graph of stakeholders, their roles, and their specific concerns.
+
+Deterministic Validation: The GapDetector acts as the "Governance Layer." By applying programmed business rules, it cross-references the register against the engagement plan and meeting notes. This stage discards "noise" and identifies genuine Configuration Gaps (e.g., missing owners, insufficient cadence).
+
+Semantic Enrichment & Risk Correlation: By leveraging the SimpleVectorStore, the system pulls in broader project context. It doesn't just identify a concern; it calculates a Strategic Risk Heatmap. By correlating a stakeholder's Influence with the Volume of Concerns, the system dynamically categorizes risk into STABLE, ELEVATED, or CRITICAL tiers.
+
+LLM Synthesis: Finally, the LLM acts as the "Program Leader." It receives the audit findings and the risk heatmap. It converts these into a narrative executive summary, prioritizing the CRITICAL risk stakeholders and connecting the dots between project friction and strategic mission alignment.
+
+This flow transforms your project documentation from static records into a dynamic audit capability, ensuring that you are no longer manually cross-referencing files, but rather overseeing the health of your program’s governance through a lens of prioritized risk management.
