@@ -1,7 +1,9 @@
-﻿Stakeholder Name,Role,Department,Influence,Interest,Current Support,Preferred Communication,Engagement Frequency,Key Concerns,Owner
-Maria Chen,Executive Sponsor,Executive,High,High,Supportive,Weekly steering updates,Weekly,Budget visibility; delivery confidence,Alice Johnson
-David Okafor,Operations Lead,Operations,High,High,Neutral,Bi-weekly working sessions,Bi-weekly,Operational disruption; training readiness,Ben Thomas
-Priya Nair,IT Security Manager,Technology,High,Medium,Neutral,Monthly risk review,Monthly,Access control; data privacy,Sophia Lee
-Helen Brooks,Compliance Director,Legal and Compliance,High,Medium,Neutral,Monthly compliance checkpoint,Monthly,Audit trail; policy adherence,Sophia Lee
-Jonas Weber,Change Manager,People and Change,Medium,High,Supportive,Weekly change forum,Weekly,Adoption; communication clarity,Ben Thomas
-Fatima Hassan,Customer Support Manager,Customer Operations,Medium,High,Neutral,Fortnightly service review,Bi-weekly,Ticket volume; training for agents,Alice Johnson
+﻿Stakeholder Name,Role,Department,Influence,Interest,Current Support,Preferred Communication,Engagement Frequency,Key Concerns,Owner,Project
+Maria Chen,Executive Sponsor,Executive,High,High,Supportive,Weekly steering updates,Weekly,Budget visibility; delivery confidence,Alice Johnson,Gap Detector Pilot
+David Okafor,Operations Lead,Operations,High,High,Neutral,Bi-weekly working sessions,Bi-weekly,Operational disruption; training readiness,Ben Thomas,Gap Detector Pilot
+Priya Nair,IT Security Manager,Technology,High,Medium,Neutral,Monthly risk review,Monthly,Access control; data privacy,Sophia Lee,Gap Detector Pilot
+Helen Brooks,Compliance Director,Legal and Compliance,High,Medium,Neutral,Monthly compliance checkpoint,Monthly,Audit trail; policy adherence,Sophia Lee,Gap Detector Pilot
+Jonas Weber,Change Manager,People and Change,Medium,High,Supportive,Weekly change forum,Weekly,Adoption; communication clarity,Ben Thomas,Gap Detector Pilot
+Fatima Hassan,Customer Support Manager,Customer Operations,Medium,High,Neutral,Fortnightly service review,Bi-weekly,Ticket volume; training for agents,Alice Johnson,Gap Detector Pilot
+Marcus Thorne,External Vendor Lead,Vendor Management,High,Low,Opposed,Quarterly business review,Quarterly,Contract scope; timeline pressure,Alice Johnson,Gap Detector Pilot
+Elena Rossi,Finance Director,Finance,Medium,Medium,Neutral,Monthly financial sync,Monthly,Budget overruns; ROI verification,Sophia Lee,Gap Detector Pilot
