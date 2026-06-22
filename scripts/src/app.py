@@ -21,7 +21,7 @@ data_folder = root_folder / "data"
 vector_store_folder = root_folder / "vector_store"
 output_folder = root_folder / "outputs"
 
-#Hardcoding files for demo
+# --- Hardcoding files for demo ---
 stakeholder_register_path = data_folder / "Stakeholder_Register.csv"
 stakeholder_plan_path = data_folder / "Stakeholder_Engagement_Plan.md"
 meeting_notes_path = data_folder / "Meeting_Notes.md"
